@@ -1,255 +1,113 @@
-name: Windows Gaming RDP
+name: RDP
 
 on:
   workflow_dispatch:
 
 jobs:
-  gaming-rdp:
+  secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 360
+    timeout-minutes: 3600
 
     steps:
-      - name: Configure Windows and RDP
-        shell: powershell
+      - name: Configure Core RDP Settings
         run: |
-          Write-Host "Configurando Windows para RDP..."
+          # Enable Remote Desktop and disable Network Level Authentication (if needed)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
 
-          # Ativar RDP
-          Set-ItemProperty `
-            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
-            -Name "fDenyTSConnections" `
-            -Value 0 `
-            -Force
+          # Remove any existing rule with the same name to avoid duplication
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          
+          # For testing, allow any incoming connection on port 3389
+          netsh advfirewall firewall add rule name="RDP-Tailscale" `
+            dir=in action=allow protocol=TCP localport=3389
 
-          # Manter NLA ativado
-          Set-ItemProperty `
-            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
-            -Name "UserAuthentication" `
-            -Value 1 `
-            -Force
+          # (Optional) Restart the Remote Desktop service to ensure changes take effect
+          Restart-Service -Name TermService -Force
 
-          # TLS
-          Set-ItemProperty `
-            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
-            -Name "SecurityLayer" `
-            -Value 1 `
-            -Force
-
-          # Firewall somente para Tailscale
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
-
-          netsh advfirewall firewall add rule `
-            name="RDP-Tailscale" `
-            dir=in `
-            action=allow `
-            protocol=TCP `
-            localport=3389 `
-            remoteip=100.64.0.0/10
-
-          Set-Service TermService -StartupType Automatic
-          Restart-Service TermService -Force
-
-      - name: Create RDP User
-        shell: powershell
-        env:
-          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+      - name: Create RDP User with Secure Password
         run: |
-          $username = "YamzzOfficial"
-
-          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
-            throw "Configure o secret RDP_PASSWORD no GitHub."
+          Add-Type -AssemblyName System.Security
+          $charSet = @{
+              Upper   = [char[]](65..90)      # A-Z
+              Lower   = [char[]](97..122)     # a-z
+              Number  = [char[]](48..57)      # 0-9
+              Special = ([char[]](33..47) + [char[]](58..64) +
+                         [char[]](91..96) + [char[]](123..126)) # Special characters
           }
-
-          $securePassword = ConvertTo-SecureString `
-            $env:RDP_PASSWORD `
-            -AsPlainText `
-            -Force
-
-          $user = Get-LocalUser `
-            -Name $username `
-            -ErrorAction SilentlyContinue
-
-          if ($user) {
-            Set-LocalUser `
-              -Name $username `
-              -Password $securePassword
+          $rawPassword = @()
+          $rawPassword += $charSet.Upper | Get-Random -Count 4
+          $rawPassword += $charSet.Lower | Get-Random -Count 4
+          $rawPassword += $charSet.Number | Get-Random -Count 4
+          $rawPassword += $charSet.Special | Get-Random -Count 4
+          $password = -join ($rawPassword | Sort-Object { Get-Random })
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          
+          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
+          
+          if (-not (Get-LocalUser -Name "RDP")) {
+              Write-Error "User creation failed"
+              exit 1
           }
-          else {
-            New-LocalUser `
-              -Name $username `
-              -Password $securePassword `
-              -AccountNeverExpires `
-              -PasswordNeverExpires
-          }
-
-          Add-LocalGroupMember `
-            -Group "Remote Desktop Users" `
-            -Member $username `
-            -ErrorAction SilentlyContinue
-
-          Write-Host "Usuário RDP configurado."
 
       - name: Install Tailscale
-        shell: powershell
         run: |
-          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
-          $installer = "$env:TEMP\tailscale.msi"
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP	ailscale.msi"
+          
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
 
-          Invoke-WebRequest `
-            -Uri $url `
-            -OutFile $installer
-
-          Start-Process `
-            msiexec.exe `
-            -ArgumentList "/i", "`"$installer`"", "/quiet", "/norestart" `
-            -Wait
-
-          Remove-Item $installer -Force
-
-          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
-
-          if (!(Test-Path $tailscale)) {
-            throw "Tailscale não foi instalado."
+      - name: Establish Tailscale Connection
+        run: |
+          # Bring up Tailscale with the provided auth key and set a unique hostname
+          & "$env:ProgramFiles\Tailscale	ailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          
+          # Wait for Tailscale to assign an IP
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale	ailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
           }
-
-      - name: Connect Tailscale
-        shell: powershell
-        env:
-          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-        run: |
-          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
-
-          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTH_KEY)) {
-            throw "Configure o secret TAILSCALE_AUTH_KEY."
+          
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
           }
-
-          & $tailscale up `
-            --authkey="$env:TAILSCALE_AUTH_KEY" `
-            --hostname="gaming-runner-$env:GITHUB_RUN_ID"
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Não foi possível conectar ao Tailscale."
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+      
+      - name: Verify RDP Accessibility
+        run: |
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          
+          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
           }
+          Write-Host "TCP connectivity successful!"
 
-          Start-Sleep -Seconds 5
-
-          $ip = (& $tailscale ip -4).Trim()
-
-          if (!$ip) {
-            throw "IP do Tailscale não encontrado."
+      - name: Maintain Connection
+        run: |
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: RDP"
+          Write-Host "Password: $(echo $env:RDP_CREDS)"
+          Write-Host "==================`n"
+          
+          # Keep runner active indefinitely (or until manually cancelled)
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Start-Sleep -Seconds 300
           }
-
-          "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
-
-          Write-Host "================================"
-          Write-Host "IP PARA RDP: $ip"
-          Write-Host "================================"
-
-      - name: Optimize Windows for Remote Graphics
-        shell: powershell
-        run: |
-          Write-Host "Aplicando otimizações gráficas..."
-
-          # Priorizar aplicações em primeiro plano
-          Set-ItemProperty `
-            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" `
-            -Name "Win32PrioritySeparation" `
-            -Value 26 `
-            -Force
-
-          # Reduzir efeitos visuais
-          Set-ItemProperty `
-            -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" `
-            -Name "VisualFXSetting" `
-            -Value 2 `
-            -Force
-
-          # Desativar transparência
-          Set-ItemProperty `
-            -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" `
-            -Name "EnableTransparency" `
-            -Value 0 `
-            -Force
-
-          Write-Host "Otimizações aplicadas."
-
-      - name: Install DirectX Runtime
-        shell: powershell
-        run: |
-          Write-Host "Instalando componentes comuns para jogos..."
-
-          $url = "https://download.microsoft.com/download/1/1/C/11C1F7B5-9B7D-4A0B-9A6C-4E1E1E1E1E1E/dxwebsetup.exe"
-          $file = "$env:TEMP\dxwebsetup.exe"
-
-          try {
-            Invoke-WebRequest `
-              -Uri $url `
-              -OutFile $file `
-              -ErrorAction Stop
-
-            Start-Process `
-              $file `
-              -ArgumentList "/Q" `
-              -Wait
-          }
-          catch {
-            Write-Host "DirectX Web Installer não foi necessário ou não pôde ser baixado."
-          }
-
-          Remove-Item $file -Force -ErrorAction SilentlyContinue
-
-      - name: Check Graphics Hardware
-        shell: powershell
-        run: |
-          Write-Host "=============================="
-          Write-Host "GPU"
-          Write-Host "=============================="
-
-          Get-CimInstance Win32_VideoController |
-            Select-Object Name, AdapterRAM, DriverVersion
-
-          Write-Host ""
-          Write-Host "CPU"
-
-          Get-CimInstance Win32_Processor |
-            Select-Object Name, NumberOfCores, NumberOfLogicalProcessors
-
-          Write-Host ""
-          Write-Host "RAM"
-
-          Get-CimInstance Win32_ComputerSystem |
-            Select-Object @{N="RAM_GB";E={[math]::Round($_.TotalPhysicalMemory / 1GB,2)}}
-
-      - name: Verify RDP
-        shell: powershell
-        run: |
-          Write-Host "=============================="
-          Write-Host "RDP DISPONIVEL"
-          Write-Host "=============================="
-
-          Write-Host "IP Tailscale: $env:TAILSCALE_IP"
-          Write-Host "Usuário: YamzzOfficial"
-          Write-Host "Porta: 3389"
-
-          Get-Service TermService |
-            Select-Object Status, StartType
-
-          Get-NetTCPConnection `
-            -LocalPort 3389 `
-            -State Listen |
-            Select-Object LocalAddress, LocalPort, State
-
-      - name: Keep Runner Online
-        shell: powershell
-        run: |
-          Write-Host ""
-          Write-Host "======================================"
-          Write-Host " WINDOWS PRONTO PARA RDP"
-          Write-Host "======================================"
-          Write-Host "IP: $env:TAILSCALE_IP"
-          Write-Host "Usuário: YamzzOfficial"
-          Write-Host "======================================"
-          Write-Host ""
-          Write-Host "O runner ficará ativo por até 6 horas."
-
-          Start-Sleep -Seconds 21600
