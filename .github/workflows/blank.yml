@@ -9,24 +9,40 @@ jobs:
     timeout-minutes: 360
 
     steps:
+
       - name: Configure RDP
         shell: powershell
         run: |
+          Write-Host "Configurando RDP..."
+
           Set-ItemProperty `
             -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-            -Name "fDenyTSConnections" `
+            -Name 'fDenyTSConnections' `
             -Value 0 `
             -Force
 
           Set-ItemProperty `
             -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name "UserAuthentication" `
+            -Name 'UserAuthentication' `
             -Value 1 `
             -Force
 
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Set-Service `
+            -Name TermService `
+            -StartupType Automatic
 
-          Restart-Service -Name TermService -Force
+          Start-Service `
+            -Name TermService `
+            -ErrorAction SilentlyContinue
+
+          Enable-NetFirewallRule `
+            -DisplayGroup 'Remote Desktop'
+
+          Restart-Service `
+            -Name TermService `
+            -Force
+
+          Write-Host "RDP configurado."
 
       - name: Create RDP User
         shell: powershell
@@ -35,20 +51,34 @@ jobs:
         run: |
           $username = "victor"
 
-          if (-not $env:RDP_PASSWORD) {
-            throw "RDP_PASSWORD não foi configurado nos Secrets."
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
+            throw "Configure o Secret RDP_PASSWORD."
           }
 
-          $securePass = ConvertTo-SecureString `
+          $securePassword = ConvertTo-SecureString `
             $env:RDP_PASSWORD `
             -AsPlainText `
             -Force
 
-          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+          $existingUser = Get-LocalUser `
+            -Name $username `
+            -ErrorAction SilentlyContinue
+
+          if (-not $existingUser) {
             New-LocalUser `
               -Name $username `
-              -Password $securePass `
-              -AccountNeverExpires
+              -Password $securePassword `
+              -AccountNeverExpires `
+              -PasswordNeverExpires
+
+            Write-Host "Usuário criado."
+          }
+          else {
+            Set-LocalUser `
+              -Name $username `
+              -Password $securePassword
+
+            Write-Host "Usuário já existia; senha atualizada."
           }
 
           Add-LocalGroupMember `
@@ -56,38 +86,110 @@ jobs:
             -Member $username `
             -ErrorAction SilentlyContinue
 
+          Write-Host "Usuário RDP: $username"
+
       - name: Install Tailscale
         shell: powershell
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
+          $version = "1.102.3"
+          $url = "https://dl.tailscale.com/stable/tailscale-setup-$version-amd64.msi"
+          $installer = "$env:TEMP\tailscale.msi"
+
+          Write-Host "Baixando Tailscale $version..."
 
           Invoke-WebRequest `
-            -Uri $tsUrl `
-            -OutFile $installerPath
+            -Uri $url `
+            -OutFile $installer
 
           Start-Process `
             msiexec.exe `
-            -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" `
+            -ArgumentList "/i", "`"$installer`"", "/quiet", "/norestart" `
             -Wait
 
-          Remove-Item $installerPath -Force
+          Remove-Item `
+            $installer `
+            -Force `
+            -ErrorAction SilentlyContinue
 
-      - name: Connect Tailscale
+          Write-Host "Tailscale instalado."
+
+      - name: Start Tailscale
         shell: powershell
         env:
           TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          if (-not $env:TAILSCALE_AUTH_KEY) {
-            throw "TAILSCALE_AUTH_KEY não foi configurado nos Secrets."
+          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTH_KEY)) {
+            throw "Configure o Secret TAILSCALE_AUTH_KEY."
           }
 
           $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          if (-not (Test-Path $tailscale)) {
+            throw "tailscale.exe não foi encontrado."
+          }
+
+          Start-Service `
+            -Name Tailscale `
+            -ErrorAction SilentlyContinue
+
+          Start-Sleep -Seconds 5
 
           & $tailscale up `
             --authkey="$env:TAILSCALE_AUTH_KEY" `
             --hostname="gh-runner-$env:GITHUB_RUN_ID"
 
+          if ($LASTEXITCODE -ne 0) {
+            throw "Falha ao conectar ao Tailscale."
+          }
+
+      - name: Verify RDP and Tailscale
+        shell: powershell
+        run: |
+          Write-Host "=============================="
+          Write-Host "RDP SERVICE"
+          Write-Host "=============================="
+
+          Get-Service TermService |
+            Format-Table Status, StartType
+
+          Write-Host ""
+          Write-Host "=============================="
+          Write-Host "PORTA 3389"
+          Write-Host "=============================="
+
+          $rdpPort = Get-NetTCPConnection `
+            -LocalPort 3389 `
+            -State Listen `
+            -ErrorAction SilentlyContinue
+
+          if (-not $rdpPort) {
+            Write-Error "A porta 3389 não está escutando."
+            exit 1
+          }
+
+          $rdpPort |
+            Format-Table LocalAddress, LocalPort, State
+
+          Write-Host ""
+          Write-Host "=============================="
+          Write-Host "TAILSCALE"
+          Write-Host "=============================="
+
+          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          & $tailscale status
+
+          Write-Host ""
+          Write-Host "=============================="
+          Write-Host "IP TAILSCALE"
+          Write-Host "=============================="
+
           $tsIP = & $tailscale ip -4
 
-          Write-Host "Tailscale IPv4: $tsIP"
+          if ([string]::IsNullOrWhiteSpace($tsIP)) {
+            Write-Error "Não foi possível obter o IP Tailscale."
+            exit 1
+          }
+
+          Write-Host "IP PARA O WINDOWS APP:"
+          Write-Host $tsIP
