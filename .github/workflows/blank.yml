@@ -48,7 +48,7 @@ jobs:
         shell: powershell
         env:
           RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
-        run: |
+        run: | tskey-auth-k1VY95HiQB11CNTRL-Pc9urKrt1zR6hvvphvuDyRLvJ6SeJ5YL
           $username = "victor"
 
           if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
