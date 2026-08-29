@@ -1,0 +1,206 @@
+name: Secure RDP via Tailscale
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Configure RDP
+        shell: powershell
+        run: |
+          Write-Host "Configurando RDP..."
+
+          # Ativar RDP
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+            -Name 'fDenyTSConnections' `
+            -Value 0 `
+            -Force
+
+          # Manter Network Level Authentication habilitado
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name 'UserAuthentication' `
+            -Value 1 `
+            -Force
+
+          # Usar camada de segurança TLS
+          Set-ItemProperty `
+            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name 'SecurityLayer' `
+            -Value 1 `
+            -Force
+
+          # Remover regra anterior, se existir
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+
+          # Permitir RDP somente pela faixa de IP do Tailscale
+          netsh advfirewall firewall add rule `
+            name="RDP-Tailscale" `
+            dir=in `
+            action=allow `
+            protocol=TCP `
+            localport=3389 `
+            remoteip=100.64.0.0/10
+
+          Set-Service -Name TermService -StartupType Automatic
+          Restart-Service -Name TermService -Force
+
+          Write-Host "RDP configurado."
+
+      - name: Create RDP User
+        shell: powershell
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          $username = "YamzzOfficial"
+
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
+            throw "O secret RDP_PASSWORD não foi configurado."
+          }
+
+          $securePass = ConvertTo-SecureString `
+            $env:RDP_PASSWORD `
+            -AsPlainText `
+            -Force
+
+          $existingUser = Get-LocalUser `
+            -Name $username `
+            -ErrorAction SilentlyContinue
+
+          if ($existingUser) {
+            Write-Host "Usuário já existe. Atualizando senha..."
+            Set-LocalUser `
+              -Name $username `
+              -Password $securePass
+          }
+          else {
+            Write-Host "Criando usuário..."
+            New-LocalUser `
+              -Name $username `
+              -Password $securePass `
+              -AccountNeverExpires `
+              -PasswordNeverExpires
+          }
+
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member $username `
+            -ErrorAction SilentlyContinue
+
+          # Não é necessário colocar o usuário em Administrators
+          # para usar RDP.
+
+          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+            throw "Falha ao criar o usuário RDP."
+          }
+
+          Write-Host "Usuário RDP configurado."
+
+      - name: Install Tailscale
+        shell: powershell
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+
+          Write-Host "Baixando Tailscale..."
+
+          Invoke-WebRequest `
+            -Uri $tsUrl `
+            -OutFile $installerPath
+
+          Start-Process `
+            msiexec.exe `
+            -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" `
+            -Wait `
+            -NoNewWindow
+
+          Remove-Item $installerPath -Force
+
+          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          if (-not (Test-Path $tailscale)) {
+            throw "Tailscale não foi instalado corretamente."
+          }
+
+          Write-Host "Tailscale instalado."
+
+      - name: Establish Tailscale Connection
+        shell: powershell
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTH_KEY)) {
+            throw "O secret TAILSCALE_AUTH_KEY não foi configurado."
+          }
+
+          & $tailscale up `
+            --authkey="$env:TAILSCALE_AUTH_KEY" `
+            --hostname="gh-runner-$env:GITHUB_RUN_ID"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Falha ao conectar ao Tailscale."
+          }
+
+          Start-Sleep -Seconds 5
+
+          Write-Host "TAILSCALE IP:"
+          $tsIP = & $tailscale ip -4
+
+          if ([string]::IsNullOrWhiteSpace($tsIP)) {
+            throw "Não foi possível obter o IP do Tailscale."
+          }
+
+          Write-Host "RDP IP: $tsIP"
+
+      - name: Verify RDP and Tailscale
+        shell: powershell
+        run: |
+          Write-Host "=============================="
+          Write-Host "RDP SERVICE"
+          Write-Host "=============================="
+
+          Get-Service TermService |
+            Select-Object Status, StartType
+
+          Write-Host ""
+          Write-Host "PORT 3389"
+          Write-Host "=============================="
+
+          Get-NetTCPConnection `
+            -LocalPort 3389 `
+            -State Listen |
+            Select-Object LocalAddress, LocalPort, State
+
+          Write-Host ""
+          Write-Host "TAILSCALE"
+          Write-Host "=============================="
+
+          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          & $tailscale ip -4
+          & $tailscale status
+
+      - name: Keep RDP Online
+        shell: powershell
+        run: |
+          Write-Host "=============================="
+          Write-Host "RDP DISPONIVEL"
+          Write-Host "=============================="
+
+          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          $tsIP = & $tailscale ip -4
+
+          Write-Host "IP Tailscale: $tsIP"
+          Write-Host "Usuario RDP: YamzzOfficial"
+          Write-Host "Porta: 3389"
+          Write-Host ""
+          Write-Host "O runner ficará disponível por até 6 horas."
+
+          Start-Sleep -Seconds 21600
