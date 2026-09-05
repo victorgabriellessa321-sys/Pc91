@@ -1,4 +1,4 @@
-name: Secure RDP
+name: RDP
 
 on:
   workflow_dispatch:
@@ -6,190 +6,144 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 360
+    timeout-minutes: 3600
 
     steps:
-
       - name: Configure RDP
         shell: powershell
         run: |
-          Write-Host "Configurando RDP..."
+          $rdpPath = 'HKLM:\System\CurrentControlSet\Control\Terminal Server'
+          $tcpPath = 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp'
 
-          Set-ItemProperty `
-            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-            -Name 'fDenyTSConnections' `
-            -Value 0 `
-            -Force
+          Set-ItemProperty -Path $rdpPath -Name 'fDenyTSConnections' -Value 0 -Force
+          Set-ItemProperty -Path $tcpPath -Name 'UserAuthentication' -Value 0 -Force
+          Set-ItemProperty -Path $tcpPath -Name 'SecurityLayer' -Value 0 -Force
 
-          Set-ItemProperty `
-            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name 'UserAuthentication' `
-            -Value 1 `
-            -Force
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
 
-          Set-Service `
-            -Name TermService `
-            -StartupType Automatic
-
-          Start-Service `
-            -Name TermService `
-            -ErrorAction SilentlyContinue
-
-          Enable-NetFirewallRule `
-            -DisplayGroup 'Remote Desktop'
-
-          Restart-Service `
-            -Name TermService `
-            -Force
-
-          Write-Host "RDP configurado."
+          if (Get-Service -Name TermService -ErrorAction SilentlyContinue) {
+              Restart-Service -Name TermService -Force
+          }
 
       - name: Create RDP User
         shell: powershell
-        env:
-          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
-        run: | tskey-auth-k1VY95HiQB11CNTRL-Pc9urKrt1zR6hvvphvuDyRLvJ6SeJ5YL
-          $username = "victor"
+        run: |
+          $username = "Skyro"
 
-          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
-            throw "Configure o Secret RDP_PASSWORD."
+          $upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.ToCharArray()
+          $lower = 'abcdefghijklmnopqrstuvwxyz'.ToCharArray()
+          $numbers = '0123456789'.ToCharArray()
+          $special = '!@#$%^&*()-_=+[]{}:,.?'.ToCharArray()
+
+          $passwordChars = @()
+          $passwordChars += $upper | Get-Random -Count 4
+          $passwordChars += $lower | Get-Random -Count 4
+          $passwordChars += $numbers | Get-Random -Count 4
+          $passwordChars += $special | Get-Random -Count 4
+
+          $password = -join ($passwordChars | Sort-Object { Get-Random })
+          $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+
+          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
+              Remove-LocalUser -Name $username
           }
 
-          $securePassword = ConvertTo-SecureString `
-            $env:RDP_PASSWORD `
-            -AsPlainText `
-            -Force
-
-          $existingUser = Get-LocalUser `
+          New-LocalUser `
             -Name $username `
-            -ErrorAction SilentlyContinue
+            -Password $securePassword `
+            -AccountNeverExpires `
+            -PasswordNeverExpires `
+            -UserMayNotChangePassword
 
-          if (-not $existingUser) {
-            New-LocalUser `
-              -Name $username `
-              -Password $securePassword `
-              -AccountNeverExpires `
-              -PasswordNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
 
-            Write-Host "Usuário criado."
-          }
-          else {
-            Set-LocalUser `
-              -Name $username `
-              -Password $securePassword
-
-            Write-Host "Usuário já existia; senha atualizada."
+          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+              throw "Failed to create RDP user."
           }
 
-          Add-LocalGroupMember `
-            -Group "Remote Desktop Users" `
-            -Member $username `
-            -ErrorAction SilentlyContinue
-
-          Write-Host "Usuário RDP: $username"
+          "RDP_CREDS=User: $username | Password: $password" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Install Tailscale
         shell: powershell
         run: |
-          $version = "1.102.3"
-          $url = "https://dl.tailscale.com/stable/tailscale-setup-$version-amd64.msi"
-          $installer = "$env:TEMP\tailscale.msi"
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
 
-          Write-Host "Baixando Tailscale $version..."
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
 
-          Invoke-WebRequest `
-            -Uri $url `
-            -OutFile $installer
-
-          Start-Process `
-            msiexec.exe `
-            -ArgumentList "/i", "`"$installer`"", "/quiet", "/norestart" `
+          Start-Process msiexec.exe `
+            -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" `
             -Wait
 
-          Remove-Item `
-            $installer `
-            -Force `
-            -ErrorAction SilentlyContinue
+          Remove-Item $installerPath -Force
 
-          Write-Host "Tailscale instalado."
-
-      - name: Start Tailscale
-        shell: powershell
-        env:
-          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTH_KEY)) {
-            throw "Configure o Secret TAILSCALE_AUTH_KEY."
-          }
-
-          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
-
-          if (-not (Test-Path $tailscale)) {
-            throw "tailscale.exe não foi encontrado."
-          }
-
-          Start-Service `
-            -Name Tailscale `
-            -ErrorAction SilentlyContinue
-
-          Start-Sleep -Seconds 5
-
-          & $tailscale up `
-            --authkey="$env:TAILSCALE_AUTH_KEY" `
-            --hostname="gh-runner-$env:GITHUB_RUN_ID"
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Falha ao conectar ao Tailscale."
-          }
-
-      - name: Verify RDP and Tailscale
+      - name: Establish Tailscale Connection
         shell: powershell
         run: |
-          Write-Host "=============================="
-          Write-Host "RDP SERVICE"
-          Write-Host "=============================="
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
+            --hostname=gh-runner-$env:GITHUB_RUN_ID
 
-          Get-Service TermService |
-            Format-Table Status, StartType
+          $tsIP = $null
+          $retries = 0
 
-          Write-Host ""
-          Write-Host "=============================="
-          Write-Host "PORTA 3389"
-          Write-Host "=============================="
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
 
-          $rdpPort = Get-NetTCPConnection `
-            -LocalPort 3389 `
-            -State Listen `
-            -ErrorAction SilentlyContinue
+              if (-not $tsIP) {
+                  Start-Sleep -Seconds 5
+              }
 
-          if (-not $rdpPort) {
-            Write-Error "A porta 3389 não está escutando."
-            exit 1
+              $retries++
           }
 
-          $rdpPort |
-            Format-Table LocalAddress, LocalPort, State
-
-          Write-Host ""
-          Write-Host "=============================="
-          Write-Host "TAILSCALE"
-          Write-Host "=============================="
-
-          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
-
-          & $tailscale status
-
-          Write-Host ""
-          Write-Host "=============================="
-          Write-Host "IP TAILSCALE"
-          Write-Host "=============================="
-
-          $tsIP = & $tailscale ip -4
-
-          if ([string]::IsNullOrWhiteSpace($tsIP)) {
-            Write-Error "Não foi possível obter o IP Tailscale."
-            exit 1
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
           }
 
-          Write-Host "IP PARA O WINDOWS APP:"
-          Write-Host $tsIP
+          "TAILSCALE_IP=$tsIP" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Verify RDP Accessibility
+        shell: powershell
+        run: |
+          $connected = $false
+
+          for ($i = 1; $i -le 6; $i++) {
+              $result = Test-NetConnection `
+                -ComputerName $env:TAILSCALE_IP `
+                -Port 3389 `
+                -WarningAction SilentlyContinue
+
+              if ($result.TcpTestSucceeded) {
+                  $connected = $true
+                  break
+              }
+
+              Start-Sleep -Seconds 5
+          }
+
+          if (-not $connected) {
+              throw "RDP port 3389 is not reachable."
+          }
+
+      - name: Maintain Connection
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "======================================"
+          Write-Host "RDP ACCESS"
+          Write-Host "======================================"
+          Write-Host "Address : $env:TAILSCALE_IP"
+          Write-Host "Username: Skyro"
+          Write-Host "Credentials: $env:RDP_CREDS"
+          Write-Host "======================================"
+          Write-Host ""
+
+          while ($true) {
+              Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] RDP Active"
+              Start-Sleep -Seconds 300
+          }
