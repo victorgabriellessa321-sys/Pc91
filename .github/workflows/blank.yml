@@ -490,6 +490,169 @@ jobs:
                 "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] RDP ativo"
 
               Start-Sleep -Seconds 60
+          }. CONECTAR TAILSCALE
+      # ==========================================
+      - name: Establish Tailscale Connection
+        shell: powershell
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTH_KEY)) {
+              throw "TAILSCALE_AUTH_KEY não configurado."
+          }
+
+          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          & $tailscale up `
+            --authkey="$env:TAILSCALE_AUTH_KEY" `
+            --hostname="gh-runner-$env:GITHUB_RUN_ID"
+
+          $tsIP = $null
+
+          for ($i = 1; $i -le 20; $i++) {
+
+              $tsIP = (& $tailscale ip -4 2>$null) |
+                Where-Object {
+                  $_ -match '^\d+\.\d+\.\d+\.\d+$'
+                } |
+                Select-Object -First 1
+
+              if ($tsIP) {
+                  break
+              }
+
+              Start-Sleep -Seconds 3
+          }
+
+          if (-not $tsIP) {
+              throw "IP Tailscale não encontrado."
+          }
+
+          "TAILSCALE_IP=$tsIP" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+          Write-Host "Tailscale IP: $tsIP"
+
+      # ==========================================
+      # 6. DIAGNÓSTICO DE REDE / RDP
+      # ==========================================
+      - name: Network and RDP Diagnostic
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          Write-Host ""
+          Write-Host "========== REDE =========="
+
+          ipconfig
+
+          Write-Host ""
+          Write-Host "========== TAILSCALE =========="
+
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" status
+
+          Write-Host ""
+          Write-Host "========== RDP =========="
+
+          Get-NetTCPConnection `
+            -LocalPort 3389 `
+            -ErrorAction SilentlyContinue |
+            Format-Table -AutoSize
+
+          $test = Test-NetConnection `
+            -ComputerName "127.0.0.1" `
+            -Port 3389 `
+            -WarningAction SilentlyContinue
+
+          Write-Host "TCP 3389: $($test.TcpTestSucceeded)"
+
+          if (-not $test.TcpTestSucceeded) {
+              Write-Warning "RDP não está respondendo na porta 3389."
+          }
+
+      # ==========================================
+      # 7. RELATÓRIO FINAL
+      # ==========================================
+      - name: Gaming Environment Report
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "=============================================="
+          Write-Host "       RELATÓRIO PARA JOGOS / ROBLOX"
+          Write-Host "=============================================="
+
+          $gpus = Get-CimInstance Win32_VideoController
+
+          foreach ($gpu in $gpus) {
+
+              Write-Host ""
+              Write-Host "GPU: $($gpu.Name)"
+              Write-Host "Driver: $($gpu.DriverVersion)"
+              Write-Host "Memória: $([math]::Round($gpu.AdapterRAM / 1GB, 2)) GB"
+
+              if ($gpu.Name -match "Microsoft Basic Display") {
+                  Write-Warning "GPU básica detectada. Jogos podem não funcionar corretamente."
+              }
+
+              if ($gpu.Name -match "Remote Display") {
+                  Write-Warning "Adaptador gráfico remoto detectado."
+              }
+          }
+
+          Write-Host ""
+          Write-Host "CPU:"
+          Get-CimInstance Win32_Processor |
+            Select-Object Name, NumberOfCores, NumberOfLogicalProcessors
+
+          Write-Host ""
+          Write-Host "RAM:"
+          Get-CimInstance Win32_OperatingSystem |
+            Select-Object `
+              @{N="TotalGB";E={
+                [math]::Round($_.TotalVisibleMemorySize / 1MB, 2)
+              }},
+              @{N="FreeGB";E={
+                [math]::Round($_.FreePhysicalMemory / 1MB, 2)
+              }}
+
+          Write-Host ""
+          Write-Host "=============================================="
+          Write-Host "        DIAGNÓSTICO CONCLUÍDO"
+          Write-Host "=============================================="
+
+      # ==========================================
+      # 8. MANTER RDP ATIVO
+      # ==========================================
+      - name: Maintain Connection
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "=============================================="
+          Write-Host "              RDP ATIVO"
+          Write-Host "=============================================="
+          Write-Host "Endereço : $env:TAILSCALE_IP"
+          Write-Host "Usuário  : $env:RDP_USERNAME"
+          Write-Host "Senha    : $env:RDP_PASSWORD"
+          Write-Host "=============================================="
+          Write-Host ""
+
+          while ($true) {
+
+              $service = Get-Service `
+                -Name TermService `
+                -ErrorAction SilentlyContinue
+
+              if ($service -and $service.Status -ne "Running") {
+                  Write-Host "RDP parado. Reiniciando..."
+                  Start-Service TermService
+              }
+
+              Write-Host `
+                "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] RDP ativo"
+
+              Start-Sleep -Seconds 60
           }g") {
                   Write-Host "RDP parou. Reiniciando..."
                   Start-Service -Name TermService
