@@ -13,7 +13,7 @@ jobs:
     # Windows + 4 CPU + Tesla T4 + 28 GB RAM + 16 GB VRAM
     #
     # NÃO invente um label se ele não existir na sua organização.
-    runs-on: windows-4-core-gpu
+    runs-on: SEU_LABEL_DA_T4
 
     timeout-minutes: 360
 
