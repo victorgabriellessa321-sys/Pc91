@@ -1,29 +1,40 @@
-name: RDP
+name: RDP Gaming
 
 on:
   workflow_dispatch:
 
 jobs:
   secure-rdp:
+
+    # IMPORTANTE:
+    # Se você tiver um runner GPU do GitHub configurado,
+    # troque esta linha pelo label do seu runner GPU.
+    #
+    # Exemplo:
+    # runs-on: windows-4-core-gpu
+    #
+    # Se não tiver runner GPU, mantenha windows-latest.
     runs-on: windows-latest
+
     timeout-minutes: 3600
 
     steps:
 
-      # ==========================================
-      # 1 - DIAGNOSTICO COMPLETO
-      # ==========================================
-      - name: Diagnostico do Runner
+      # ==================================================
+      # 1 - DIAGNOSTICO DO HARDWARE
+      # ==================================================
+      - name: Diagnostico do Hardware
         shell: powershell
         run: |
           $ErrorActionPreference = "Continue"
 
           Write-Host ""
           Write-Host "=============================================="
-          Write-Host "          DIAGNOSTICO DO RUNNER"
+          Write-Host "          DIAGNOSTICO DO HARDWARE"
           Write-Host "=============================================="
           Write-Host ""
 
+          # WINDOWS
           Write-Host "========== WINDOWS =========="
 
           $os = Get-CimInstance Win32_OperatingSystem
@@ -33,16 +44,19 @@ jobs:
           Write-Host "Build: $($os.BuildNumber)"
           Write-Host "Arquitetura: $($os.OSArchitecture)"
 
+          # CPU
           Write-Host ""
           Write-Host "========== CPU =========="
 
           Get-CimInstance Win32_Processor |
-            Select-Object Name,
-                          NumberOfCores,
-                          NumberOfLogicalProcessors,
-                          MaxClockSpeed |
+            Select-Object `
+              Name,
+              NumberOfCores,
+              NumberOfLogicalProcessors,
+              MaxClockSpeed |
             Format-List
 
+          # RAM
           Write-Host ""
           Write-Host "========== RAM =========="
 
@@ -65,44 +79,56 @@ jobs:
           Write-Host "Usada: $usedRAM GB"
           Write-Host "Livre: $freeRAM GB"
 
+          # GPU
           Write-Host ""
           Write-Host "========== GPU =========="
 
           $gpus = Get-CimInstance Win32_VideoController
 
-          if ($null -eq $gpus) {
-              Write-Host "Nenhuma GPU detectada."
+          if ($gpus) {
+
+            foreach ($gpu in $gpus) {
+
+              $gpuRam = 0
+
+              if ($gpu.AdapterRAM) {
+                $gpuRam = [math]::Round(
+                  $gpu.AdapterRAM / 1GB,
+                  2
+                )
+              }
+
+              Write-Host "Nome: $($gpu.Name)"
+              Write-Host "Driver: $($gpu.DriverVersion)"
+              Write-Host "GPU RAM: $gpuRam GB"
+              Write-Host "Resolucao: $($gpu.VideoModeDescription)"
+              Write-Host "Status: $($gpu.Status)"
+              Write-Host ""
+
+              if ($gpu.Name -match "NVIDIA") {
+                Write-Host "NVIDIA DETECTADA."
+              }
+
+              if ($gpu.Name -match "RTX") {
+                Write-Host "GPU RTX DETECTADA."
+              }
+
+              if ($gpu.Name -match "Microsoft Basic Display") {
+                Write-Warning "Microsoft Basic Display Adapter detectado."
+                Write-Warning "Este ambiente pode nao ter aceleracao 3D adequada."
+              }
+
+              if ($gpu.Name -match "Remote Display") {
+                Write-Warning "Adaptador de video remoto detectado."
+              }
+            }
+
           }
           else {
-              foreach ($gpu in $gpus) {
-
-                  $gpuRam = 0
-
-                  if ($gpu.AdapterRAM) {
-                      $gpuRam = [math]::Round(
-                          $gpu.AdapterRAM / 1GB,
-                          2
-                      )
-                  }
-
-                  Write-Host "Nome: $($gpu.Name)"
-                  Write-Host "Driver: $($gpu.DriverVersion)"
-                  Write-Host "Data do Driver: $($gpu.DriverDate)"
-                  Write-Host "GPU RAM: $gpuRam GB"
-                  Write-Host "Resolucao: $($gpu.VideoModeDescription)"
-                  Write-Host "Status: $($gpu.Status)"
-                  Write-Host ""
-
-                  if ($gpu.Name -match "Microsoft Basic Display") {
-                      Write-Warning "Adaptador grafico basico detectado."
-                  }
-
-                  if ($gpu.Name -match "Remote Display") {
-                      Write-Warning "Adaptador grafico remoto detectado."
-                  }
-              }
+            Write-Warning "Nenhuma GPU detectada."
           }
 
+          # DIRECTX
           Write-Host ""
           Write-Host "========== DIRECTX =========="
 
@@ -116,26 +142,30 @@ jobs:
 
           if (Test-Path $dxdiag) {
 
-              Get-Content $dxdiag |
-                Select-String `
-                  "Operating System",
-                  "Processor",
-                  "Memory",
-                  "DirectX Version",
-                  "Card name",
-                  "Display Memory",
-                  "Driver Model",
-                  "Driver Version"
+            Get-Content $dxdiag |
+              Select-String `
+                "Operating System",
+                "Processor",
+                "Memory",
+                "DirectX Version",
+                "Card name",
+                "Display Memory",
+                "Driver Model",
+                "Driver Version"
+
           }
           else {
-              Write-Host "DxDiag nao foi gerado."
+            Write-Warning "DxDiag nao foi criado."
           }
 
+          # DISCO
           Write-Host ""
           Write-Host "========== DISCO =========="
 
-          Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" |
-            Select-Object DeviceID,
+          Get-CimInstance Win32_LogicalDisk `
+            -Filter "DriveType=3" |
+            Select-Object `
+              DeviceID,
               @{Name="TotalGB";Expression={
                 [math]::Round($_.Size / 1GB, 2)
               }},
@@ -145,30 +175,13 @@ jobs:
             Format-Table -AutoSize
 
           Write-Host ""
-          Write-Host "========== VIRTUALIZACAO =========="
+          Write-Host "=============================================="
+          Write-Host "          FIM DO DIAGNOSTICO"
+          Write-Host "=============================================="
 
-          systeminfo |
-            Select-String `
-              "Hyper-V Requirements",
-              "Virtualization",
-              "VM Monitor"
-
-          Write-Host ""
-          Write-Host "========== DIAGNOSTICO FINAL =========="
-
-          if ($gpus) {
-              Write-Host "GPU detectada."
-          }
-          else {
-              Write-Warning "Nenhuma GPU detectada."
-          }
-
-          Write-Host ""
-          Write-Host "Diagnostico concluido."
-
-      # ==========================================
+      # ==================================================
       # 2 - CONFIGURAR RDP
-      # ==========================================
+      # ==================================================
       - name: Configurar RDP
         shell: powershell
         run: |
@@ -179,13 +192,14 @@ jobs:
           $rdpPath = "HKLM:\System\CurrentControlSet\Control\Terminal Server"
           $tcpPath = "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
 
+          # Ativar RDP
           Set-ItemProperty `
             -Path $rdpPath `
             -Name "fDenyTSConnections" `
             -Value 0 `
             -Force
 
-          # NLA ativado
+          # NLA
           Set-ItemProperty `
             -Path $tcpPath `
             -Name "UserAuthentication" `
@@ -199,11 +213,13 @@ jobs:
             -Value 1 `
             -Force
 
+          # Firewall
           Enable-NetFirewallRule `
             -DisplayGroup "Remote Desktop" `
             -ErrorAction SilentlyContinue
 
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
+          netsh advfirewall firewall delete rule `
+            name="RDP-Tailscale" 2>$null
 
           netsh advfirewall firewall add rule `
             name="RDP-Tailscale" `
@@ -212,27 +228,31 @@ jobs:
             protocol=TCP `
             localport=3389
 
+          # Serviço
           $service = Get-Service `
-            -Name TermService `
-            -ErrorAction Stop
+            -Name TermService
 
           if ($service.Status -eq "Running") {
-              Restart-Service `
-                -Name TermService `
-                -Force
+
+            Restart-Service `
+              -Name TermService `
+              -Force
+
           }
           else {
-              Start-Service `
-                -Name TermService
+
+            Start-Service `
+              -Name TermService
+
           }
 
           Start-Sleep -Seconds 3
 
           Write-Host "RDP configurado."
 
-      # ==========================================
-      # 3 - CRIAR USUARIO
-      # ==========================================
+      # ==================================================
+      # 3 - CRIAR USUARIO RDP
+      # ==================================================
       - name: Criar Usuario RDP
         shell: powershell
         run: |
@@ -240,7 +260,7 @@ jobs:
 
           $username = "Skyro"
 
-          Write-Host "Criando usuario $username..."
+          Write-Host "Criando usuario..."
 
           $upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".ToCharArray()
           $lower = "abcdefghijklmnopqrstuvwxyz".ToCharArray()
@@ -255,8 +275,8 @@ jobs:
           $passwordChars += $special | Get-Random -Count 4
 
           $password = -join (
-              $passwordChars |
-              Sort-Object { Get-Random }
+            $passwordChars |
+            Sort-Object { Get-Random }
           )
 
           $securePassword = ConvertTo-SecureString `
@@ -264,20 +284,22 @@ jobs:
             -AsPlainText `
             -Force
 
-          $existing = Get-LocalUser `
+          $oldUser = Get-LocalUser `
             -Name $username `
             -ErrorAction SilentlyContinue
 
-          if ($existing) {
-              Remove-LocalUser `
-                -Name $username `
-                -ErrorAction Stop
+          if ($oldUser) {
+
+            Remove-LocalUser `
+              -Name $username `
+              -ErrorAction Stop
+
           }
 
           New-LocalUser `
             -Name $username `
             -Password $securePassword `
-            -Description "RDP User" `
+            -Description "RDP Gaming User" `
             -AccountNeverExpires `
             -PasswordNeverExpires `
             -UserMayNotChangePassword
@@ -292,8 +314,14 @@ jobs:
             -Member $username `
             -ErrorAction SilentlyContinue
 
-          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
-              throw "Falha ao criar usuario."
+          if (-not (
+            Get-LocalUser `
+              -Name $username `
+              -ErrorAction SilentlyContinue
+          )) {
+
+            throw "Falha ao criar usuario."
+
           }
 
           "RDP_USERNAME=$username" |
@@ -308,20 +336,19 @@ jobs:
               -Append `
               -Encoding utf8
 
-          Write-Host "Usuario criado com sucesso."
+          Write-Host "Usuario criado."
 
-      # ==========================================
+      # ==================================================
       # 4 - INSTALAR TAILSCALE
-      # ==========================================
+      # ==================================================
       - name: Instalar Tailscale
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
 
           $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installer = "$env:TEMP\tailscale.msi"
 
-          Write-Host "Baixando Tailscale..."
+          $installer = "$env:TEMP\tailscale.msi"
 
           Invoke-WebRequest `
             -Uri $url `
@@ -344,14 +371,232 @@ jobs:
           $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
 
           if (-not (Test-Path $tailscale)) {
-              throw "Tailscale nao foi instalado."
+            throw "Tailscale nao foi instalado."
           }
 
           Write-Host "Tailscale instalado."
 
-      # ==========================================
+      # ==================================================
       # 5 - CONECTAR TAILSCALE
-      # ==========================================
+      # ==================================================
+      - name: Conectar Tailscale
+        shell: powershell
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if ([string]::IsNullOrWhiteSpace(
+            $env:TAILSCALE_AUTH_KEY
+          )) {
+
+            throw "TAILSCALE_AUTH_KEY nao configurado."
+
+          }
+
+          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          & $tailscale up `
+            --authkey="$env:TAILSCALE_AUTH_KEY" `
+            --hostname="gh-gaming-$env:GITHUB_RUN_ID"
+
+          $tsIP = $null
+
+          for ($i = 1; $i -le 20; $i++) {
+
+            $tsIP = (
+              & $tailscale ip -4 2>$null
+            ) |
+              Where-Object {
+                $_ -match "^\d+\.\d+\.\d+\.\d+$"
+              } |
+              Select-Object -First 1
+
+            if ($tsIP) {
+              break
+            }
+
+            Write-Host "Aguardando Tailscale... $i/20"
+
+            Start-Sleep -Seconds 3
+          }
+
+          if (-not $tsIP) {
+            throw "IP Tailscale nao encontrado."
+          }
+
+          "TAILSCALE_IP=$tsIP" |
+            Out-File `
+              $env:GITHUB_ENV `
+              -Append `
+              -Encoding utf8
+
+          Write-Host "IP Tailscale: $tsIP"
+
+      # ==================================================
+      # 6 - TESTAR RDP
+      # ==================================================
+      - name: Testar RDP
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "Testando RDP..."
+
+          $service = Get-Service `
+            -Name TermService
+
+          if ($service.Status -ne "Running") {
+
+            Start-Service `
+              -Name TermService
+
+            Start-Sleep -Seconds 3
+
+          }
+
+          $listening = Get-NetTCPConnection `
+            -LocalPort 3389 `
+            -State Listen `
+            -ErrorAction SilentlyContinue
+
+          if (-not $listening) {
+            throw "Porta 3389 nao esta escutando."
+          }
+
+          $test = Test-NetConnection `
+            -ComputerName "127.0.0.1" `
+            -Port 3389 `
+            -WarningAction SilentlyContinue
+
+          if (-not $test.TcpTestSucceeded) {
+            throw "RDP nao respondeu."
+          }
+
+          Write-Host "RDP funcionando."
+
+      # ==================================================
+      # 7 - VERIFICAR ROBLOX
+      # ==================================================
+      - name: Verificar Roblox
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "=============================================="
+          Write-Host "             VERIFICANDO ROBLOX"
+          Write-Host "=============================================="
+
+          $paths = @(
+            "$env:LOCALAPPDATA\Roblox\Versions",
+            "$env:ProgramFiles\Roblox",
+            "${env:ProgramFiles(x86)}\Roblox"
+          )
+
+          $found = $false
+
+          foreach ($path in $paths) {
+
+            if (Test-Path $path) {
+
+              Write-Host "Diretorio encontrado: $path"
+
+              $found = $true
+
+              $exe = Get-ChildItem `
+                -Path $path `
+                -Filter "RobloxPlayerBeta.exe" `
+                -Recurse `
+                -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+
+              if ($exe) {
+
+                Write-Host "Roblox encontrado:"
+                Write-Host $exe.FullName
+
+                Start-Process `
+                  -FilePath $exe.FullName `
+                  -ErrorAction SilentlyContinue
+
+                Start-Sleep -Seconds 10
+
+                $process = Get-Process `
+                  -Name "RobloxPlayerBeta" `
+                  -ErrorAction SilentlyContinue
+
+                if ($process) {
+
+                  Write-Host "Roblox iniciou."
+
+                }
+                else {
+
+                  Write-Warning "Roblox nao iniciou."
+
+                }
+
+                break
+              }
+            }
+          }
+
+          if (-not $found) {
+
+            Write-Host "Roblox nao esta instalado."
+
+          }
+
+      # ==================================================
+      # 8 - MOSTRAR ACESSO
+      # ==================================================
+      - name: Mostrar Acesso RDP
+        shell: powershell
+        run: |
+          Write-Host ""
+          Write-Host "=============================================="
+          Write-Host "                 RDP ATIVO"
+          Write-Host "=============================================="
+          Write-Host ""
+          Write-Host "Endereco : $env:TAILSCALE_IP"
+          Write-Host "Porta    : 3389"
+          Write-Host "Usuario  : $env:RDP_USERNAME"
+          Write-Host "Senha    : $env:RDP_PASSWORD"
+          Write-Host ""
+          Write-Host "=============================================="
+          Write-Host ""
+
+      # ==================================================
+      # 9 - MANTER RUNNER
+      # ==================================================
+      - name: Manter Conexao
+        shell: powershell
+        run: |
+          Write-Host "RDP ativo."
+
+          while ($true) {
+
+            $service = Get-Service `
+              -Name TermService `
+              -ErrorAction SilentlyContinue
+
+            if ($service) {
+
+              if ($service.Status -ne "Running") {
+
+                Write-Host "RDP parou. Reiniciando..."
+
+                Start-Service `
+                  -Name TermService `
+                  -ErrorAction SilentlyContinue
+
+              }
+            }
+
+            Write-Host `
+              "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] RDP ativo"
+
+            Start-Sleep -Seconds 60
+          }    # ==========================================
       - name: Conectar Tailscale
         shell: powershell
         env:
