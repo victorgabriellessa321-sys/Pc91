@@ -1,0 +1,40 @@
+
+name: Gamer RDP Windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gamer:
+    runs-on: windows-latest
+    steps:
+      - name: Baixar repositório
+        uses: actions/checkout@v4
+
+      - name: Informações do Windows
+        shell: pwsh
+        run: |
+          Get-ComputerInfo |
+            Select-Object WindowsProductName,
+                          WindowsVersion,
+                          OsArchitecture
+
+      - name: Verificar GPU NVIDIA
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_VideoController |
+            Select-Object Name,
+                          DriverVersion,
+                          AdapterRAM |
+            Format-Table -AutoSize
+
+          if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+            nvidia-smi
+          } else {
+            Write-Host "nvidia-smi não disponível."
+            Write-Host "RTX 3060 não garantida neste runner."
+          }
+          
